@@ -1,3 +1,7 @@
+// Processes in the AWS Lambda environment don't have the permissions to set a thread's name calling prctl(PR_SET_NAME).
+// Async tries to do so and crashes on launch.
+// All this is to ignore calls to prctl coming from Async.
+
 #define _GNU_SOURCE
 #include <linux/prctl.h>
 #include <dlfcn.h>
