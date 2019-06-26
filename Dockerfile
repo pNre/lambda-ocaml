@@ -7,9 +7,9 @@ RUN opam update
 RUN opam upgrade -y
 RUN opam install -y dune
 RUN eval `opam config env`
-RUN opam depext async core cohttp-async ppx_deriving yojson
+RUN opam depext async core cohttp-async ppx_deriving ppx_deriving_yojson yojson
 RUN opam pin https://github.com/inhabitedtype/httpaf.git
-RUN opam install -y async core cohttp-async ppx_deriving yojson
+RUN opam install -y async core cohttp-async ppx_deriving ppx_deriving_yojson yojson
 COPY --chown=opam:nogroup . /app
 RUN rm main.exe || true
 RUN opam config exec -- dune build main.exe --profile=static

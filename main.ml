@@ -16,22 +16,15 @@ let string_of_error = function
   | Handler_error error -> error
 ;;
 
-let aws_lambda_runtime_path = "/2018-06-01/runtime"
+module Lambda = struct
+  type error =
+    { error_type : string [@key "errorType"]
+    ; error_message : string [@key "errorMessage"]
+    ; stack_trace : string [@key "stackTrace"]
+    }
+  [@@deriving to_yojson { strict = false }, make]
 
-module Env = struct
-  let aws_lambda_host_and_port =
-    "AWS_LAMBDA_RUNTIME_API" |> Sys.getenv_exn |> Host_and_port.of_string
-  ;;
-
-  let aws_lambda_log_group_name = "AWS_LAMBDA_LOG_GROUP_NAME" |> Sys.getenv
-  let aws_lambda_log_stream_name = "AWS_LAMBDA_LOG_STREAM_NAME" |> Sys.getenv
-  let aws_lambda_function_name = "AWS_LAMBDA_FUNCTION_NAME" |> Sys.getenv
-  let aws_lambda_function_version = "AWS_LAMBDA_FUNCTION_VERSION" |> Sys.getenv
-  let aws_lambda_function_memory_size = "AWS_LAMBDA_FUNCTION_MEMORY_SIZE" |> Sys.getenv
-end
-
-module Context = struct
-  type t =
+  type context =
     { aws_request_id : string
     ; invoked_function_arn : string option [@default None]
     ; deadline_ms : string option [@default None]
@@ -41,7 +34,7 @@ module Context = struct
     }
   [@@deriving make]
 
-  let of_response { Response.headers; _ } =
+  let context_of_response { Response.headers; _ } =
     let aws_request_id =
       Option.value_exn (Header.get headers "lambda-runtime-aws-request-id")
     in
@@ -52,7 +45,7 @@ module Context = struct
     let trace_id = Header.get headers "lambda-runtime-trace-id" in
     let client_context = Header.get headers "lambda-runtime-client-context" in
     let cognito_identity = Header.get headers "lambda-runtime-cognito-identity" in
-    make
+    make_context
       ~aws_request_id
       ~invoked_function_arn
       ~deadline_ms
@@ -61,13 +54,27 @@ module Context = struct
       ~cognito_identity
       ()
   ;;
+
+  let runtime_path = "/2018-06-01/runtime"
+
+  module Env = struct
+    let host_and_port =
+      "AWS_LAMBDA_RUNTIME_API" |> Sys.getenv_exn |> Host_and_port.of_string
+    ;;
+
+    let log_group_name = "AWS_LAMBDA_LOG_GROUP_NAME" |> Sys.getenv
+    let log_stream_name = "AWS_LAMBDA_LOG_STREAM_NAME" |> Sys.getenv
+    let function_name = "AWS_LAMBDA_FUNCTION_NAME" |> Sys.getenv
+    let function_version = "AWS_LAMBDA_FUNCTION_VERSION" |> Sys.getenv
+    let function_memory_size = "AWS_LAMBDA_FUNCTION_MEMORY_SIZE" |> Sys.getenv
+  end
 end
 
 let request_uri path =
   Uri.make
     ~scheme:"http"
-    ~host:Env.aws_lambda_host_and_port.host
-    ~port:Env.aws_lambda_host_and_port.port
+    ~host:Lambda.Env.host_and_port.host
+    ~port:Lambda.Env.host_and_port.port
     ~path
     ()
 ;;
@@ -92,41 +99,38 @@ let request http_method uri ?(http_headers = []) ?(body = None) () =
   | response, body -> Response_error (response, body) |> Deferred.Result.fail
 ;;
 
-let invocation_response context ?(response = "") () =
+let invocation_response ~context ~response =
   let uri =
     request_uri
-      (aws_lambda_runtime_path
-      ^ "/invocation/"
-      ^ context.Context.aws_request_id
-      ^ "/response")
+      (Lambda.runtime_path ^ "/invocation/" ^ context.Lambda.aws_request_id ^ "/response")
   in
   request `POST uri ~body:(Some response) ()
 ;;
 
-let invocation_error context ?(error = "") () =
+let invocation_error ~context ~error =
   let headers =
-    [ "Content-Type", "application/json"; "Lambda-Runtime-Function-Error-Type", "Error" ]
+    [ "Content-Type", "application/json"
+    ; "Lambda-Runtime-Function-Error-Type", error.Lambda.error_type
+    ]
   in
   let uri =
     request_uri
-      (aws_lambda_runtime_path
-      ^ "/invocation/"
-      ^ context.Context.aws_request_id
-      ^ "/error")
+      (Lambda.runtime_path ^ "/invocation/" ^ context.Lambda.aws_request_id ^ "/error")
   in
-  request `POST uri ~http_headers:headers ~body:(Some error) ()
+  let json = error |> Lambda.error_to_yojson |> Yojson.Safe.to_string in
+  request `POST uri ~http_headers:headers ~body:(Some json) ()
 ;;
 
 let next_invocation handler =
-  let uri = request_uri (aws_lambda_runtime_path ^ "/invocation/next") in
+  let uri = request_uri (Lambda.runtime_path ^ "/invocation/next") in
   request `GET uri ()
   >>|? (fun (response, body) ->
-         Context.of_response response, Yojson.Safe.from_string body)
+         Lambda.context_of_response response, Yojson.Safe.from_string body)
   >>=? fun (context, body) ->
   handler context body
   >>= function
-  | Ok response -> invocation_response context ~response ()
-  | Error error -> invocation_error context ~error ()
+  | Ok response -> invocation_response ~context ~response
+  | Error error -> invocation_error ~context ~error
 ;;
 
 let test_handler _context _body = Deferred.Result.return "🐫"
