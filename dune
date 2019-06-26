@@ -1,4 +1,4 @@
 (executable
  (name main)
- (libraries core async cohttp cohttp-async yojson)
- (preprocess (pps ppx_deriving.show ppx_deriving.make ppx_deriving_yojson)))
+ (libraries async cohttp cohttp-async yojson)
+ (preprocess (pps ppx_deriving.make ppx_deriving_yojson)))

@@ -34,6 +34,8 @@ module Lambda = struct
     }
   [@@deriving make]
 
+  let runtime_path = "/2018-06-01/runtime/invocation/"
+
   let context_of_response { Response.headers; _ } =
     let aws_request_id =
       Option.value_exn (Header.get headers "lambda-runtime-aws-request-id")
@@ -55,18 +57,16 @@ module Lambda = struct
       ()
   ;;
 
-  let runtime_path = "/2018-06-01/runtime"
-
   module Env = struct
     let host_and_port =
       "AWS_LAMBDA_RUNTIME_API" |> Sys.getenv_exn |> Host_and_port.of_string
     ;;
 
-    let log_group_name = "AWS_LAMBDA_LOG_GROUP_NAME" |> Sys.getenv
-    let log_stream_name = "AWS_LAMBDA_LOG_STREAM_NAME" |> Sys.getenv
-    let function_name = "AWS_LAMBDA_FUNCTION_NAME" |> Sys.getenv
-    let function_version = "AWS_LAMBDA_FUNCTION_VERSION" |> Sys.getenv
-    let function_memory_size = "AWS_LAMBDA_FUNCTION_MEMORY_SIZE" |> Sys.getenv
+    let log_group_name () = "AWS_LAMBDA_LOG_GROUP_NAME" |> Sys.getenv
+    let log_stream_name () = "AWS_LAMBDA_LOG_STREAM_NAME" |> Sys.getenv
+    let function_name () = "AWS_LAMBDA_FUNCTION_NAME" |> Sys.getenv
+    let function_version () = "AWS_LAMBDA_FUNCTION_VERSION" |> Sys.getenv
+    let function_memory_size () = "AWS_LAMBDA_FUNCTION_MEMORY_SIZE" |> Sys.getenv
   end
 end
 
@@ -90,19 +90,19 @@ let request http_method uri ?(http_headers = []) ?(body = None) () =
   in
   call
   >>| Result.map_error ~f:(fun e -> Request_error e)
-  >>=? (fun (response, body) ->
-         body |> Body.to_string >>| fun body -> Result.return (response, body))
-  >>=? function
-  | ({ status; _ } as response), body when Code.is_success (Code.code_of_status status)
-    ->
-    Deferred.Result.return (response, body)
-  | response, body -> Response_error (response, body) |> Deferred.Result.fail
+  >>=? fun (response, body) ->
+  let handle_response body =
+    match response with
+    | { status; _ } when Code.is_success (Code.code_of_status status) ->
+      Result.return (response, body)
+    | _ -> Response_error (response, body) |> Result.fail
+  in
+  body |> Body.to_string >>| handle_response
 ;;
 
 let invocation_response ~context ~response =
   let uri =
-    request_uri
-      (Lambda.runtime_path ^ "/invocation/" ^ context.Lambda.aws_request_id ^ "/response")
+    request_uri (Lambda.runtime_path ^ context.Lambda.aws_request_id ^ "/response")
   in
   request `POST uri ~body:(Some response) ()
 ;;
@@ -114,28 +114,33 @@ let invocation_error ~context ~error =
     ]
   in
   let uri =
-    request_uri
-      (Lambda.runtime_path ^ "/invocation/" ^ context.Lambda.aws_request_id ^ "/error")
+    request_uri (Lambda.runtime_path ^ context.Lambda.aws_request_id ^ "/error")
   in
   let json = error |> Lambda.error_to_yojson |> Yojson.Safe.to_string in
   request `POST uri ~http_headers:headers ~body:(Some json) ()
 ;;
 
-let next_invocation handler =
-  let uri = request_uri (Lambda.runtime_path ^ "/invocation/next") in
-  request `GET uri ()
-  >>|? (fun (response, body) ->
-         Lambda.context_of_response response, Yojson.Safe.from_string body)
-  >>=? fun (context, body) ->
-  handler context body
+let dispatch_event context event handler =
+  handler context event
   >>= function
   | Ok response -> invocation_response ~context ~response
   | Error error -> invocation_error ~context ~error
 ;;
 
+let next_invocation handler =
+  let uri = request_uri (Lambda.runtime_path ^ "next") in
+  request `GET uri ()
+  >>|? (fun (response, body) ->
+         let context = Lambda.context_of_response response in
+         let event = Yojson.Safe.from_string body in
+         context, event)
+  >>=? (fun (context, event) -> dispatch_event context event handler)
+  >>| ignore
+;;
+
 let test_handler _context _body = Deferred.Result.return "🐫"
 
 let () =
-  Deferred.forever () (fun () -> next_invocation test_handler >>| ignore);
+  Deferred.forever () (fun () -> next_invocation test_handler);
   never_returns (Scheduler.go ())
 ;;
